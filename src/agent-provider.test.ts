@@ -52,9 +52,8 @@ describe('agent-provider', () => {
   });
 
   it('detects codex API key auth from auth.json when API key is present', async () => {
-    const { hasCodexApiKeyAuth, hasCodexAuth } = await import(
-      './agent-provider.js'
-    );
+    const { hasCodexApiKeyAuth, hasCodexAuth } =
+      await import('./agent-provider.js');
     mockFiles.set(
       '/tmp/home/.codex/auth.json',
       JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'sk-test' }),
@@ -105,9 +104,8 @@ describe('agent-provider', () => {
   });
 
   it('falls back to openai when codex auth mode is not set', async () => {
-    const { hasCodexAuth, resolveCodexAuthMode } = await import(
-      './agent-provider.js'
-    );
+    const { hasCodexAuth, resolveCodexAuthMode } =
+      await import('./agent-provider.js');
     expect(hasCodexAuth('/tmp/home')).toBe(false);
     expect(resolveCodexAuthMode(undefined, '/tmp/home')).toBe('openai');
   });

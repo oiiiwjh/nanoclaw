@@ -14,7 +14,9 @@ function normalizeAgentProvider(value?: string): AgentProvider {
 
 export function getConfiguredAgentProvider(): AgentProvider {
   const env = readEnvFile(['AGENT_PROVIDER']);
-  return normalizeAgentProvider(process.env.AGENT_PROVIDER || env.AGENT_PROVIDER);
+  return normalizeAgentProvider(
+    process.env.AGENT_PROVIDER || env.AGENT_PROVIDER,
+  );
 }
 
 export function resolveAgentProvider(group?: RegisteredGroup): AgentProvider {
@@ -79,8 +81,8 @@ export function hasCodexOAuthAuth(homeDir = os.homedir()): boolean {
     };
     return Boolean(
       auth.auth_mode === 'chatgpt' &&
-        auth.tokens?.access_token &&
-        auth.tokens?.refresh_token,
+      auth.tokens?.access_token &&
+      auth.tokens?.refresh_token,
     );
   } catch {
     return false;

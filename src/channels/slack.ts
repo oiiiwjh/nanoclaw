@@ -72,7 +72,9 @@ export class SlackChannel implements Channel {
 
   private setupEventHandlers(): void {
     this.app.use(async ({ body, next }) => {
-      const event = (body as { event?: { type?: string; channel?: string; text?: string } }).event;
+      const event = (
+        body as { event?: { type?: string; channel?: string; text?: string } }
+      ).event;
       if (event?.type) {
         logger.info(
           {
@@ -131,7 +133,10 @@ export class SlackChannel implements Channel {
     // Only deliver full messages for registered groups
     const groups = this.opts.registeredGroups();
     if (!groups[jid]) {
-      logger.info({ jid, text: msg.text }, 'Slack message ignored: channel not registered');
+      logger.info(
+        { jid, text: msg.text },
+        'Slack message ignored: channel not registered',
+      );
       return;
     }
 
@@ -154,10 +159,7 @@ export class SlackChannel implements Channel {
     let content = msg.text;
     if (this.botUserId && !isBotMessage) {
       const mentionPattern = `<@${this.botUserId}>`;
-      if (
-        content.includes(mentionPattern) &&
-        !TRIGGER_PATTERN.test(content)
-      ) {
+      if (content.includes(mentionPattern) && !TRIGGER_PATTERN.test(content)) {
         content = `@${ASSISTANT_NAME} ${content}`;
       }
     }

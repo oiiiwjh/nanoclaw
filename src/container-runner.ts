@@ -71,7 +71,8 @@ function hashDirectory(dir: string): string {
   const ignoredFiles = new Set(['.nanoclaw-upstream-hash']);
 
   const visit = (currentDir: string, relativeDir = ''): void => {
-    const entries = fs.readdirSync(currentDir, { withFileTypes: true })
+    const entries = fs
+      .readdirSync(currentDir, { withFileTypes: true })
       .sort((a, b) => a.name.localeCompare(b.name));
 
     for (const entry of entries) {
@@ -241,7 +242,12 @@ function buildVolumeMounts(
 
   if (provider === 'codex') {
     const hostCodexDir = path.join(os.homedir(), '.codex');
-    const groupCodexDir = path.join(DATA_DIR, 'sessions', group.folder, '.codex');
+    const groupCodexDir = path.join(
+      DATA_DIR,
+      'sessions',
+      group.folder,
+      '.codex',
+    );
     fs.mkdirSync(groupCodexDir, { recursive: true });
 
     for (const file of ['config.toml', 'version.json']) {
