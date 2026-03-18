@@ -3,13 +3,16 @@
  * Spawns agent execution in containers and handles IPC
  */
 import { ChildProcess, exec, spawn } from 'child_process';
+import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 
 import {
   AgentProvider,
+  CodexAuthMode,
   resolveAgentProvider,
+  resolveCodexAuthMode,
 } from './agent-provider.js';
 import {
   CONTAINER_IMAGE,
@@ -21,6 +24,7 @@ import {
   IDLE_TIMEOUT,
   TIMEZONE,
 } from './config.js';
+import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import {
@@ -30,6 +34,7 @@ import {
   readonlyMountArgs,
   stopContainer,
 } from './container-runtime.js';
+import { syncCodexMirror } from './codex-mirror.js';
 import { detectAuthMode } from './credential-proxy.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
@@ -61,10 +66,75 @@ interface VolumeMount {
   readonly: boolean;
 }
 
+function hashDirectory(dir: string): string {
+  const hash = crypto.createHash('sha256');
+  const ignoredFiles = new Set(['.nanoclaw-upstream-hash']);
+
+  const visit = (currentDir: string, relativeDir = ''): void => {
+    const entries = fs.readdirSync(currentDir, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const entry of entries) {
+      const relativePath = path.join(relativeDir, entry.name);
+      const fullPath = path.join(currentDir, entry.name);
+
+      if (ignoredFiles.has(entry.name)) {
+        continue;
+      }
+
+      if (entry.isDirectory()) {
+        visit(fullPath, relativePath);
+        continue;
+      }
+
+      hash.update(relativePath);
+      hash.update('\0');
+      hash.update(fs.readFileSync(fullPath));
+      hash.update('\0');
+    }
+  };
+
+  visit(dir);
+  return hash.digest('hex');
+}
+
+function syncGroupAgentRunnerSource(
+  projectSourceDir: string,
+  groupSourceDir: string,
+  groupName: string,
+): void {
+  const markerPath = path.join(groupSourceDir, '.nanoclaw-upstream-hash');
+  const projectHash = hashDirectory(projectSourceDir);
+
+  if (!fs.existsSync(groupSourceDir)) {
+    fs.cpSync(projectSourceDir, groupSourceDir, { recursive: true });
+    fs.writeFileSync(markerPath, `${projectHash}\n`);
+    return;
+  }
+
+  const previousHash = fs.existsSync(markerPath)
+    ? fs.readFileSync(markerPath, 'utf-8').trim()
+    : '';
+  const currentGroupHash = hashDirectory(groupSourceDir);
+
+  if (!previousHash || currentGroupHash === previousHash) {
+    fs.rmSync(groupSourceDir, { recursive: true, force: true });
+    fs.cpSync(projectSourceDir, groupSourceDir, { recursive: true });
+    fs.writeFileSync(markerPath, `${projectHash}\n`);
+    return;
+  }
+
+  logger.warn(
+    { group: groupName, groupSourceDir },
+    'Group-specific agent runner source has diverged from upstream; leaving custom copy in place',
+  );
+}
+
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
   provider: AgentProvider,
+  codexAuthMode?: CodexAuthMode,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
@@ -174,7 +244,7 @@ function buildVolumeMounts(
     const groupCodexDir = path.join(DATA_DIR, 'sessions', group.folder, '.codex');
     fs.mkdirSync(groupCodexDir, { recursive: true });
 
-    for (const file of ['auth.json', 'config.toml', 'version.json']) {
+    for (const file of ['config.toml', 'version.json']) {
       const src = path.join(hostCodexDir, file);
       const dst = path.join(groupCodexDir, file);
       if (fs.existsSync(src)) {
@@ -190,10 +260,66 @@ function buildVolumeMounts(
       }
     }
 
+    const authPath = path.join(groupCodexDir, 'auth.json');
+    if (codexAuthMode === 'openai-codex') {
+      const srcAuth = path.join(hostCodexDir, 'auth.json');
+      if (!fs.existsSync(srcAuth)) {
+        throw new Error(
+          'Codex auth mode openai-codex requires host codex login (~/.codex/auth.json).',
+        );
+      }
+
+      const hostAuth = JSON.parse(fs.readFileSync(srcAuth, 'utf-8')) as {
+        auth_mode?: string;
+        tokens?: {
+          access_token?: string;
+          refresh_token?: string;
+          id_token?: string;
+          account_id?: string;
+        };
+        last_refresh?: string;
+      };
+      if (!hostAuth.tokens?.access_token || !hostAuth.tokens?.refresh_token) {
+        throw new Error(
+          'Codex auth mode openai-codex requires ChatGPT OAuth tokens in ~/.codex/auth.json.',
+        );
+      }
+      fs.writeFileSync(
+        authPath,
+        JSON.stringify(
+          {
+            auth_mode: 'chatgpt',
+            tokens: hostAuth.tokens,
+            last_refresh: hostAuth.last_refresh,
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+    } else {
+      const codexEnv = readEnvFile(['OPENAI_API_KEY']);
+      if (!codexEnv.OPENAI_API_KEY) {
+        throw new Error(
+          'Codex auth mode openai requires OPENAI_API_KEY in .env.',
+        );
+      }
+      fs.writeFileSync(
+        authPath,
+        JSON.stringify(
+          {
+            auth_mode: 'apikey',
+            OPENAI_API_KEY: codexEnv.OPENAI_API_KEY,
+          },
+          null,
+          2,
+        ) + '\n',
+      );
+    }
+
     mounts.push({
       hostPath: groupCodexDir,
-      containerPath: '/workspace/codex-auth',
-      readonly: true,
+      containerPath: '/home/node/.codex',
+      readonly: false,
     });
   }
 
@@ -224,8 +350,8 @@ function buildVolumeMounts(
     group.folder,
     'agent-runner-src',
   );
-  if (!fs.existsSync(groupAgentRunnerDir) && fs.existsSync(agentRunnerSrc)) {
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
+  if (fs.existsSync(agentRunnerSrc)) {
+    syncGroupAgentRunnerSource(agentRunnerSrc, groupAgentRunnerDir, group.name);
   }
   mounts.push({
     hostPath: groupAgentRunnerDir,
@@ -314,7 +440,14 @@ export async function runContainerAgent(
   fs.mkdirSync(groupDir, { recursive: true });
 
   const provider = resolveAgentProvider(group);
-  const mounts = buildVolumeMounts(group, input.isMain, provider);
+  const codexAuthMode =
+    provider === 'codex' ? resolveCodexAuthMode(group) : undefined;
+  const mounts = buildVolumeMounts(
+    group,
+    input.isMain,
+    provider,
+    codexAuthMode,
+  );
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName, provider);
@@ -323,6 +456,7 @@ export async function runContainerAgent(
     {
       group: group.name,
       provider,
+      codexAuthMode,
       containerName,
       mounts: mounts.map(
         (m) =>
@@ -526,6 +660,17 @@ export async function runContainerAgent(
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const logFile = path.join(logsDir, `container-${timestamp}.log`);
+
+      if (provider === 'codex') {
+        try {
+          syncCodexMirror(group.folder, group.name);
+        } catch (err) {
+          logger.warn(
+            { group: group.name, err },
+            'Failed to mirror Codex sessions into host ~/.codex',
+          );
+        }
+      }
       const isVerbose =
         process.env.LOG_LEVEL === 'debug' || process.env.LOG_LEVEL === 'trace';
 

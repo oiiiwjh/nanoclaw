@@ -2,10 +2,14 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 import { spawn } from 'child_process';
+import fs from 'fs';
+import os from 'os';
 
 // Sentinel markers must match container-runner.ts
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+const mockEnv: Record<string, string> = {};
+const mockFiles = new Map<string, string>();
 
 // Mock config
 vi.mock('./config.js', () => ({
@@ -17,6 +21,17 @@ vi.mock('./config.js', () => ({
   GROUPS_DIR: '/tmp/nanoclaw-test-groups',
   IDLE_TIMEOUT: 1800000, // 30min
   TIMEZONE: 'America/Los_Angeles',
+}));
+
+vi.mock('./env.js', () => ({
+  readEnvFile: vi.fn((keys?: string[]) => {
+    if (!keys) return { ...mockEnv };
+    return Object.fromEntries(
+      keys
+        .filter((key) => mockEnv[key] != null)
+        .map((key) => [key, mockEnv[key]]),
+    );
+  }),
 }));
 
 // Mock logger
@@ -36,10 +51,10 @@ vi.mock('fs', async () => {
     ...actual,
     default: {
       ...actual,
-      existsSync: vi.fn(() => false),
+      existsSync: vi.fn((file: string) => mockFiles.has(file)),
       mkdirSync: vi.fn(),
       writeFileSync: vi.fn(),
-      readFileSync: vi.fn(() => ''),
+      readFileSync: vi.fn((file: string) => mockFiles.get(file) ?? ''),
       readdirSync: vi.fn(() => []),
       statSync: vi.fn(() => ({ isDirectory: () => false })),
       copyFileSync: vi.fn(),
@@ -116,11 +131,16 @@ describe('container-runner timeout behavior', () => {
   beforeEach(() => {
     vi.useFakeTimers();
     fakeProc = createFakeProcess();
+    for (const key of Object.keys(mockEnv)) delete mockEnv[key];
+    mockFiles.clear();
+    vi.mocked(fs.writeFileSync).mockClear();
+    vi.mocked(fs.copyFileSync).mockClear();
   });
 
   afterEach(() => {
     vi.useRealTimers();
     delete process.env.AGENT_PROVIDER;
+    delete process.env.CODEX_AUTH_MODE;
   });
 
   it('timeout after output resolves as success', async () => {
@@ -212,6 +232,7 @@ describe('container-runner timeout behavior', () => {
 
   it('uses codex provider env without anthopic proxy placeholders', async () => {
     process.env.AGENT_PROVIDER = 'codex';
+    mockEnv.OPENAI_API_KEY = 'sk-test';
     const resultPromise = runContainerAgent(
       testGroup,
       testInput,
@@ -235,5 +256,88 @@ describe('container-runner timeout behavior', () => {
 
     const result = await resultPromise;
     expect(result.newSessionId).toBe('session-codex');
+  });
+
+  it('writes API key auth.json for codex openai mode', async () => {
+    process.env.AGENT_PROVIDER = 'codex';
+    process.env.CODEX_AUTH_MODE = 'openai';
+    mockEnv.OPENAI_API_KEY = 'sk-test';
+
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+
+    expect(vi.mocked(fs.writeFileSync)).toHaveBeenCalledWith(
+      '/tmp/nanoclaw-test-data/sessions/test-group/.codex/auth.json',
+      expect.stringContaining('"auth_mode": "apikey"'),
+    );
+    expect(vi.mocked(fs.writeFileSync)).toHaveBeenCalledWith(
+      '/tmp/nanoclaw-test-data/sessions/test-group/.codex/auth.json',
+      expect.stringContaining('"OPENAI_API_KEY": "sk-test"'),
+    );
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'Done',
+      newSessionId: 'session-openai',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    await resultPromise;
+  });
+
+  it('writes OAuth auth.json for codex openai-codex mode', async () => {
+    process.env.AGENT_PROVIDER = 'codex';
+    process.env.CODEX_AUTH_MODE = 'openai-codex';
+    mockFiles.set(
+      '/root/.codex/auth.json',
+      JSON.stringify({
+        auth_mode: 'chatgpt',
+        tokens: {
+          access_token: 'access',
+          refresh_token: 'refresh',
+        },
+        last_refresh: '2026-03-18T00:00:00Z',
+      }),
+    );
+
+    const osSpy = vi.spyOn(os, 'homedir');
+    osSpy.mockReturnValue('/root');
+
+    try {
+      const resultPromise = runContainerAgent(
+        testGroup,
+        testInput,
+        () => {},
+        vi.fn(async () => {}),
+      );
+
+      expect(vi.mocked(fs.writeFileSync)).toHaveBeenCalledWith(
+        '/tmp/nanoclaw-test-data/sessions/test-group/.codex/auth.json',
+        expect.stringContaining('"auth_mode": "chatgpt"'),
+      );
+      expect(vi.mocked(fs.writeFileSync)).toHaveBeenCalledWith(
+        '/tmp/nanoclaw-test-data/sessions/test-group/.codex/auth.json',
+        expect.stringContaining('"access_token": "access"'),
+      );
+
+      emitOutputMarker(fakeProc, {
+        status: 'success',
+        result: 'Done',
+        newSessionId: 'session-oauth',
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      fakeProc.emit('close', 0);
+      await vi.advanceTimersByTimeAsync(10);
+
+      await resultPromise;
+    } finally {
+      osSpy.mockRestore();
+    }
   });
 });

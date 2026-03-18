@@ -70,7 +70,7 @@ If the user doesn't have a Slack app, share [SLACK_SETUP.md](SLACK_SETUP.md) whi
 Quick summary of what's needed:
 1. Create a Slack app at [api.slack.com/apps](https://api.slack.com/apps)
 2. Enable Socket Mode and generate an App-Level Token (`xapp-...`)
-3. Subscribe to bot events: `message.channels`, `message.groups`, `message.im`
+3. Enable **Event Subscriptions** and subscribe to bot events: `app_mention`, `message.channels`, `message.groups`, `message.im`
 4. Add OAuth scopes: `chat:write`, `channels:history`, `groups:history`, `im:history`, `channels:read`, `groups:read`, `users:read`
 5. Install to workspace and copy the Bot Token (`xoxb-...`)
 
@@ -162,9 +162,18 @@ tail -f logs/nanoclaw.log
 ### Bot connected but not receiving messages
 
 1. Verify Socket Mode is enabled in the Slack app settings
-2. Verify the bot is subscribed to the correct events (`message.channels`, `message.groups`, `message.im`)
+2. Verify **Event Subscriptions** is enabled and the bot is subscribed to the correct events (`app_mention`, `message.channels`, `message.groups`, `message.im`)
 3. Verify the bot has been added to the channel
 4. Check that the bot has the required OAuth scopes
+
+### Bot receives normal messages but not `@bot` mentions
+
+If `@your-bot ...` does nothing but the bot is connected:
+1. Go to **Event Subscriptions**
+2. Add the `app_mention` bot event
+3. Save changes
+4. Reinstall the app to the workspace if Slack prompts for it
+5. Restart NanoClaw
 
 ### Bot not seeing messages in channels
 

@@ -35,6 +35,7 @@ const appRef = vi.hoisted(() => ({ current: null as any }));
 vi.mock('@slack/bolt', () => ({
   App: class MockApp {
     eventHandlers = new Map<string, Handler>();
+    middleware: Handler[] = [];
     token: string;
     appToken: string;
 
@@ -66,6 +67,10 @@ vi.mock('@slack/bolt', () => ({
 
     event(name: string, handler: Handler) {
       this.eventHandlers.set(name, handler);
+    }
+
+    use(handler: Handler) {
+      this.middleware.push(handler);
     }
 
     async start() {}
@@ -139,6 +144,13 @@ async function triggerMessageEvent(
   if (handler) await handler({ event });
 }
 
+async function triggerAppMentionEvent(
+  event: ReturnType<typeof createMessageEvent>,
+) {
+  const handler = currentApp().eventHandlers.get('app_mention');
+  if (handler) await handler({ event: { ...event, type: 'app_mention' } });
+}
+
 // --- Tests ---
 
 describe('SlackChannel', () => {
@@ -167,6 +179,7 @@ describe('SlackChannel', () => {
       new SlackChannel(opts);
 
       expect(currentApp().eventHandlers.has('message')).toBe(true);
+      expect(currentApp().eventHandlers.has('app_mention')).toBe(true);
     });
 
     it('gets bot user ID on connect', async () => {
@@ -223,6 +236,25 @@ describe('SlackChannel', () => {
           sender: 'U_USER_456',
           content: 'Hello everyone',
           is_from_me: false,
+        }),
+      );
+    });
+
+    it('delivers app_mention for registered channel', async () => {
+      const opts = createTestOpts();
+      const channel = new SlackChannel(opts);
+      await channel.connect();
+
+      const event = createMessageEvent({
+        text: '<@U_BOT_123> say hello',
+        user: 'U_USER_456',
+      });
+      await triggerAppMentionEvent(event);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'slack:C0123456789',
+        expect.objectContaining({
+          content: '@Jonesy <@U_BOT_123> say hello',
         }),
       );
     });

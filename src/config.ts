@@ -8,12 +8,19 @@ import { readEnvFile } from './env.js';
 // by the credential proxy (credential-proxy.ts), never exposed to containers.
 const envConfig = readEnvFile([
   'AGENT_PROVIDER',
+  'CODEX_AUTH_MODE',
   'ASSISTANT_NAME',
   'ASSISTANT_HAS_OWN_NUMBER',
 ]);
 
 export const AGENT_PROVIDER =
   envConfig.AGENT_PROVIDER === 'codex' ? 'codex' : 'claude';
+
+export const CODEX_AUTH_MODE =
+  envConfig.CODEX_AUTH_MODE === 'openai' ||
+  envConfig.CODEX_AUTH_MODE === 'openai-codex'
+    ? envConfig.CODEX_AUTH_MODE
+    : undefined;
 
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';

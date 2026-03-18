@@ -1,5 +1,9 @@
 import { App, LogLevel } from '@slack/bolt';
-import type { GenericMessageEvent, BotMessageEvent } from '@slack/types';
+import type {
+  AppMentionEvent,
+  GenericMessageEvent,
+  BotMessageEvent,
+} from '@slack/types';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { updateChatName } from '../db.js';
@@ -21,6 +25,7 @@ const MAX_MESSAGE_LENGTH = 4000;
 // we filter to regular messages (GenericMessageEvent, subtype undefined) and bot messages
 // (BotMessageEvent, subtype 'bot_message') so we can track our own output.
 type HandledMessageEvent = GenericMessageEvent | BotMessageEvent;
+type InboundSlackEvent = HandledMessageEvent | AppMentionEvent;
 
 export interface SlackChannelOpts {
   onMessage: OnInboundMessage;
@@ -66,6 +71,21 @@ export class SlackChannel implements Channel {
   }
 
   private setupEventHandlers(): void {
+    this.app.use(async ({ body, next }) => {
+      const event = (body as { event?: { type?: string; channel?: string; text?: string } }).event;
+      if (event?.type) {
+        logger.info(
+          {
+            type: event.type,
+            channel: event.channel,
+            text: event.text,
+          },
+          'Slack raw event received',
+        );
+      }
+      await next();
+    });
+
     // Use app.event('message') instead of app.message() to capture all
     // message subtypes including bot_message (needed to track our own output)
     this.app.event('message', async ({ event }) => {
@@ -75,61 +95,92 @@ export class SlackChannel implements Channel {
       if (subtype && subtype !== 'bot_message') return;
 
       // After filtering, event is either GenericMessageEvent or BotMessageEvent
-      const msg = event as HandledMessageEvent;
+      await this.handleInboundEvent(event as HandledMessageEvent);
+    });
 
-      if (!msg.text) return;
+    this.app.event('app_mention', async ({ event }) => {
+      await this.handleInboundEvent(event as AppMentionEvent);
+    });
+  }
 
-      // Threaded replies are flattened into the channel conversation.
-      // The agent sees them alongside channel-level messages; responses
-      // always go to the channel, not back into the thread.
+  private async handleInboundEvent(msg: InboundSlackEvent): Promise<void> {
+    if (!msg.text) return;
 
-      const jid = `slack:${msg.channel}`;
-      const timestamp = new Date(parseFloat(msg.ts) * 1000).toISOString();
-      const isGroup = msg.channel_type !== 'im';
+    // Threaded replies are flattened into the channel conversation.
+    // The agent sees them alongside channel-level messages; responses
+    // always go to the channel, not back into the thread.
+    const jid = `slack:${msg.channel}`;
+    const timestamp = new Date(parseFloat(msg.ts) * 1000).toISOString();
+    const channelType =
+      'channel_type' in msg && msg.channel_type ? msg.channel_type : 'channel';
+    const isGroup = channelType !== 'im';
 
-      // Always report metadata for group discovery
-      this.opts.onChatMetadata(jid, timestamp, undefined, 'slack', isGroup);
+    logger.info(
+      {
+        jid,
+        user: msg.user,
+        channelType,
+        text: msg.text,
+      },
+      'Slack inbound message received',
+    );
 
-      // Only deliver full messages for registered groups
-      const groups = this.opts.registeredGroups();
-      if (!groups[jid]) return;
+    // Always report metadata for group discovery
+    this.opts.onChatMetadata(jid, timestamp, undefined, 'slack', isGroup);
 
-      const isBotMessage = !!msg.bot_id || msg.user === this.botUserId;
+    // Only deliver full messages for registered groups
+    const groups = this.opts.registeredGroups();
+    if (!groups[jid]) {
+      logger.info({ jid, text: msg.text }, 'Slack message ignored: channel not registered');
+      return;
+    }
 
-      let senderName: string;
-      if (isBotMessage) {
-        senderName = ASSISTANT_NAME;
-      } else {
-        senderName =
-          (msg.user ? await this.resolveUserName(msg.user) : undefined) ||
-          msg.user ||
-          'unknown';
+    const isBotMessage =
+      ('bot_id' in msg && !!msg.bot_id) || msg.user === this.botUserId;
+
+    let senderName: string;
+    if (isBotMessage) {
+      senderName = ASSISTANT_NAME;
+    } else {
+      senderName =
+        (msg.user ? await this.resolveUserName(msg.user) : undefined) ||
+        msg.user ||
+        'unknown';
+    }
+
+    // Translate Slack <@UBOTID> mentions into TRIGGER_PATTERN format.
+    // Slack encodes @mentions as <@U12345>, which won't match TRIGGER_PATTERN
+    // (e.g., ^@<ASSISTANT_NAME>\b), so we prepend the trigger when the bot is @mentioned.
+    let content = msg.text;
+    if (this.botUserId && !isBotMessage) {
+      const mentionPattern = `<@${this.botUserId}>`;
+      if (
+        content.includes(mentionPattern) &&
+        !TRIGGER_PATTERN.test(content)
+      ) {
+        content = `@${ASSISTANT_NAME} ${content}`;
       }
+    }
 
-      // Translate Slack <@UBOTID> mentions into TRIGGER_PATTERN format.
-      // Slack encodes @mentions as <@U12345>, which won't match TRIGGER_PATTERN
-      // (e.g., ^@<ASSISTANT_NAME>\b), so we prepend the trigger when the bot is @mentioned.
-      let content = msg.text;
-      if (this.botUserId && !isBotMessage) {
-        const mentionPattern = `<@${this.botUserId}>`;
-        if (
-          content.includes(mentionPattern) &&
-          !TRIGGER_PATTERN.test(content)
-        ) {
-          content = `@${ASSISTANT_NAME} ${content}`;
-        }
-      }
-
-      this.opts.onMessage(jid, {
-        id: msg.ts,
-        chat_jid: jid,
-        sender: msg.user || msg.bot_id || '',
-        sender_name: senderName,
+    logger.info(
+      {
+        jid,
+        sender: msg.user || ('bot_id' in msg ? msg.bot_id : '') || '',
+        senderName,
         content,
-        timestamp,
-        is_from_me: isBotMessage,
-        is_bot_message: isBotMessage,
-      });
+      },
+      'Slack inbound message routed to NanoClaw',
+    );
+
+    this.opts.onMessage(jid, {
+      id: msg.ts,
+      chat_jid: jid,
+      sender: msg.user || ('bot_id' in msg ? msg.bot_id : '') || '',
+      sender_name: senderName,
+      content,
+      timestamp,
+      is_from_me: isBotMessage,
+      is_bot_message: isBotMessage,
     });
   }
 

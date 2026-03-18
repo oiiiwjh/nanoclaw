@@ -81,6 +81,26 @@ function setupLaunchd(
   );
   fs.mkdirSync(path.dirname(plistPath), { recursive: true });
 
+  const launchdPath = [
+    '/opt/homebrew/bin',
+    '/opt/homebrew/sbin',
+    '/usr/local/bin',
+    '/usr/bin',
+    '/bin',
+    `${homeDir}/.local/bin`,
+  ].join(':');
+
+  const launchCommand = [
+    'set -eu',
+    `export HOME=${shellQuote(homeDir)}`,
+    `export PATH=${shellQuote(launchdPath)}`,
+    `PROJECT_ROOT=${shellQuote(projectRoot)}`,
+    'LOG_DIR="$HOME/Library/Logs/nanoclaw"',
+    'mkdir -p "$LOG_DIR"',
+    `cd ${shellQuote(projectRoot)}`,
+    `exec ${shellQuote(nodePath)} dist/index.js >> "$LOG_DIR/nanoclaw.log" 2>> "$LOG_DIR/nanoclaw.error.log"`,
+  ].join('; ');
+
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -89,11 +109,12 @@ function setupLaunchd(
     <string>com.nanoclaw</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${nodePath}</string>
-        <string>${projectRoot}/dist/index.js</string>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>${escapeXml(launchCommand)}</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>${projectRoot}</string>
+    <string>${homeDir}</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -101,14 +122,10 @@ function setupLaunchd(
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:${homeDir}/.local/bin</string>
+        <string>${launchdPath}</string>
         <key>HOME</key>
         <string>${homeDir}</string>
     </dict>
-    <key>StandardOutPath</key>
-    <string>${projectRoot}/logs/nanoclaw.log</string>
-    <key>StandardErrorPath</key>
-    <string>${projectRoot}/logs/nanoclaw.error.log</string>
 </dict>
 </plist>`;
 
@@ -142,6 +159,19 @@ function setupLaunchd(
     STATUS: 'success',
     LOG: 'logs/setup.log',
   });
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
 }
 
 function setupLinux(

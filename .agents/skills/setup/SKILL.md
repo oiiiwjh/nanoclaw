@@ -5,214 +5,333 @@ description: Run initial NanoClaw setup. Use when user wants to install dependen
 
 # NanoClaw Setup
 
-Run setup steps automatically. Only pause when user action is required (channel authentication, configuration choices). Setup uses `bash setup.sh` for bootstrap, then `npx tsx setup/index.ts --step <name>` for all other steps. Steps emit structured status blocks to stdout. Verbose logs go to `logs/setup.log`.
+Bring a fresh or partially configured NanoClaw install to a working state.
 
-**Principle:** When something is broken or missing, fix it. Don't tell the user to go fix it themselves unless it genuinely requires their manual action (e.g. authenticating a channel, pasting a secret token). If a dependency is missing, install it. If a service won't start, diagnose and repair. Ask the user for permission when needed, then do the work.
+Setup should do the work directly whenever the action is local, reversible, and low risk. Only pause when user action is genuinely required:
+- choosing between valid setup paths
+- authenticating a channel or completing a GUI flow
+- placing a secret into `.env`
+- approving a high-risk repository or system change
 
-**UX Note:** Use `AskUserQuestion` for all user-facing questions.
+Use `bash setup.sh` for bootstrap, then `npx tsx setup/index.ts --step <name>` for scripted checks and state changes. Steps emit structured status blocks to stdout. Verbose logs go to `logs/setup.log`.
 
-## 0. Git & Fork Setup
+## Execution Policy
 
-Check the git remote configuration to ensure the user has a fork and upstream is configured.
+- Detect current state before modifying anything.
+- Prefer non-destructive changes. Do not rewrite git remotes, overwrite config, or force-push unless the user explicitly confirms.
+- Do not ask the user to paste secrets into chat. Secrets should be written locally into `.env`.
+- If a dependency is missing and can be installed safely, install it. If the install path depends on privileges or GUI approval, explain the next action and continue once the user has completed it.
+- Re-run the relevant setup step after each fix instead of assuming the fix worked.
+- If a delegated skill is unavailable, say so briefly and continue with the rest of setup instead of blocking the whole workflow.
+
+## Interaction Rules
+
+- Keep questions short and decision-oriented. Offer a recommended default when there is one.
+- Ask before any destructive or account-affecting action, including:
+  - renaming git remotes
+  - changing the user's push target
+  - force-pushing
+  - replacing existing credentials
+  - switching container runtime implementations
+- When a choice is optional and the user does not care, pick the lower-risk default and proceed.
+
+## 0. Preflight
+
+Gather baseline state before making changes.
 
 Run:
 - `git remote -v`
+- `bash setup.sh`
+- `npx tsx setup/index.ts --step environment`
 
-**Case A — `origin` points to `qwibitai/nanoclaw` (user cloned directly):**
+Record:
+- platform and whether WSL is in use
+- Node.js status
+- dependency and native module status
+- whether `.env` exists
+- whether auth is already configured
+- whether any groups are already registered
+- whether Docker and Apple Container are installed/running
 
-The user cloned instead of forking. AskUserQuestion: "You cloned NanoClaw directly. We recommend forking so you can push your customizations. Would you like to set up a fork?"
-- Fork now (recommended) — walk them through it
-- Continue without fork — they'll only have local changes
+Use the results from this step to drive later decisions. Do not repeat discovery unless the environment changes.
 
-If fork: instruct the user to fork `qwibitai/nanoclaw` on GitHub (they need to do this in their browser), then ask them for their GitHub username. Run:
-```bash
-git remote rename origin upstream
-git remote add origin https://github.com/<their-username>/nanoclaw.git
-git push --force origin main
-```
-Verify with `git remote -v`.
+## 1. Git Remotes
 
-If continue without fork: add upstream so they can still pull updates:
+Preferred remote layout:
+- `origin` -> user's fork
+- `upstream` -> `https://github.com/qwibitai/nanoclaw.git`
+
+Rules:
+- Do not rename remotes or push branches without explicit confirmation.
+- Do not use `git push --force` as part of the default setup path.
+- If the user cloned upstream directly, recommend creating a fork, but allow them to continue without one.
+
+Cases:
+
+**Case A - `origin` points to `qwibitai/nanoclaw`:**
+
+Explain that a fork is recommended so customizations can be pushed safely.
+
+Offer:
+- set up a fork now
+- continue without a fork
+
+If the user chooses a fork:
+- ask for their GitHub username after they create the fork in the browser
+- rename `origin` to `upstream` only with explicit confirmation
+- add the fork as `origin`
+- verify remotes with `git remote -v`
+
+If the user chooses to continue without a fork:
+- add `upstream` only if it is missing and non-conflicting
+
+**Case B - `origin` points to the user's fork and `upstream` is missing:**
+
+Add `upstream`:
+
 ```bash
 git remote add upstream https://github.com/qwibitai/nanoclaw.git
 ```
 
-**Case B — `origin` points to user's fork, no `upstream` remote:**
+**Case C - `origin` points to the user's fork and `upstream` exists:**
 
-Add upstream:
+Continue.
+
+Success criteria:
+- remotes are valid for the user's chosen workflow
+
+## 2. Bootstrap
+
+Bootstrap with:
+
 ```bash
-git remote add upstream https://github.com/qwibitai/nanoclaw.git
+bash setup.sh
 ```
 
-**Case C — both `origin` (user's fork) and `upstream` (qwibitai) exist:**
+Parse the status block.
 
-Already configured. Continue.
+- If `NODE_OK=false`, offer to install Node.js 22. Choose the safest available method for the platform.
+- If `DEPS_OK=false`, inspect `logs/setup.log`, repair the dependency state, then retry.
+- If `NATIVE_OK=false`, install the required build tools, then retry.
 
-**Verify:** `git remote -v` should show `origin` → user's repo, `upstream` → `qwibitai/nanoclaw.git`.
+Common repairs:
+- remove and reinstall `node_modules` if dependency state is corrupted
+- install build tools when native modules fail
+- re-run `bash setup.sh` after each change
 
-## 1. Bootstrap (Node.js + Dependencies)
-
-Run `bash setup.sh` and parse the status block.
-
-- If NODE_OK=false → Node.js is missing or too old. Use `AskUserQuestion: Would you like me to install Node.js 22?` If confirmed:
-  - macOS: `brew install node@22` (if brew available) or install nvm then `nvm install 22`
-  - Linux: `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs`, or nvm
-  - After installing Node, re-run `bash setup.sh`
-- If DEPS_OK=false → Read `logs/setup.log`. Try: delete `node_modules`, re-run `bash setup.sh`. If native module build fails, install build tools (`xcode-select --install` on macOS, `build-essential` on Linux), then retry.
-- If NATIVE_OK=false → better-sqlite3 failed to load. Install build tools and re-run.
-- Record PLATFORM and IS_WSL for later steps.
-
-## 2. Check Environment
-
-Run `npx tsx setup/index.ts --step environment` and parse the status block.
-
-- If HAS_AUTH=true → WhatsApp is already configured, note for step 5
-- If HAS_REGISTERED_GROUPS=true → note existing config, offer to skip or reconfigure
-- Record APPLE_CONTAINER and DOCKER values for step 3
+Success criteria:
+- bootstrap reports Node, dependencies, and native modules as healthy
 
 ## 3. Container Runtime
 
+Choose the runtime from the preflight results.
+
 ### 3a. Choose runtime
 
-Check the preflight results for `APPLE_CONTAINER` and `DOCKER`, and the PLATFORM from step 1.
+- `PLATFORM=linux`: Docker is the only supported runtime
+- `PLATFORM=macos` and Apple Container is installed: ask the user to choose between Docker and Apple Container
+- `PLATFORM=macos` and Apple Container is not installed: use Docker
 
-- PLATFORM=linux → Docker (only option)
-- PLATFORM=macos + APPLE_CONTAINER=installed → Use `AskUserQuestion: Docker (cross-platform) or Apple Container (native macOS)?` If Apple Container, run `/convert-to-apple-container` now, then skip to 3c.
-- PLATFORM=macos + APPLE_CONTAINER=not_found → Docker
+Default to Docker unless the user explicitly wants Apple Container on macOS.
 
-### 3a-docker. Install Docker
+### 3b. Install or start the chosen runtime
 
-- DOCKER=running → continue to 4b
-- DOCKER=installed_not_running → start Docker: `open -a Docker` (macOS) or `sudo systemctl start docker` (Linux). Wait 15s, re-check with `docker info`.
-- DOCKER=not_found → Use `AskUserQuestion: Docker is required for running agents. Would you like me to install it?` If confirmed:
-  - macOS: install via `brew install --cask docker`, then `open -a Docker` and wait for it to start. If brew not available, direct to Docker Desktop download at https://docker.com/products/docker-desktop
-  - Linux: install with `curl -fsSL https://get.docker.com | sh && sudo usermod -aG docker $USER`. Note: user may need to log out/in for group membership.
+For Docker:
+- if `DOCKER=running`, continue
+- if `DOCKER=installed_not_running`, start it and re-check with `docker info`
+- if `DOCKER=not_found`, offer to install it
 
-### 3b. Apple Container conversion gate (if needed)
+For Apple Container:
+- if the runtime is not installed, stop and ask the user whether they want to install and use it
 
-**If the chosen runtime is Apple Container**, you MUST check whether the source code has already been converted from Docker to Apple Container. Do NOT skip this step. Run:
+Do not assume package manager access, GUI availability, or root privileges. Check first.
+
+### 3c. Apple Container conversion gate
+
+If the chosen runtime is Apple Container, verify whether the codebase has already been converted from Docker:
 
 ```bash
 grep -q "CONTAINER_RUNTIME_BIN = 'container'" src/container-runtime.ts && echo "ALREADY_CONVERTED" || echo "NEEDS_CONVERSION"
 ```
 
-**If NEEDS_CONVERSION**, the source code still uses Docker as the runtime. You MUST run the `/convert-to-apple-container` skill NOW, before proceeding to the build step.
+- If `NEEDS_CONVERSION`, run `/convert-to-apple-container` before building
+- If `ALREADY_CONVERTED`, continue
 
-**If ALREADY_CONVERTED**, the code already uses Apple Container. Continue to 3c.
+If the chosen runtime is Docker, skip this step.
 
-**If the chosen runtime is Docker**, no conversion is needed. Continue to 3c.
+### 3d. Build and test
 
-### 3c. Build and test
+Run:
 
-Run `npx tsx setup/index.ts --step container -- --runtime <chosen>` and parse the status block.
+```bash
+npx tsx setup/index.ts --step container -- --runtime <chosen>
+```
 
-**If BUILD_OK=false:** Read `logs/setup.log` tail for the build error.
-- Cache issue (stale layers): `docker builder prune -f` (Docker) or `container builder stop && container builder rm && container builder start` (Apple Container). Retry.
-- Dockerfile syntax or missing files: diagnose from the log and fix, then retry.
+Parse the status block.
 
-**If TEST_OK=false but BUILD_OK=true:** The image built but won't run. Check logs — common cause is runtime not fully started. Wait a moment and retry the test.
+- If `BUILD_OK=false`, inspect `logs/setup.log`, repair the cause, and retry
+- If the failure looks like stale build cache, clear the runtime builder cache and retry
+- If `TEST_OK=false` but `BUILD_OK=true`, treat it as a runtime readiness or smoke-test issue and retry after confirming the runtime is actually up
 
-## 4. Codex Authentication (No Script)
+Success criteria:
+- container image builds successfully
+- smoke test passes
 
-If HAS_ENV=true from step 2, read `.env` and check for `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`. If present, confirm with user: keep or reconfigure?
+## 4. Authentication Credentials
 
-AskUserQuestion: Codex subscription (Pro/Max) vs Anthropic API key?
+Inspect `.env` if present and check for supported credentials.
 
-**Subscription:** Tell user to run `Codex setup-token` in another terminal, copy the token, add `CLAUDE_CODE_OAUTH_TOKEN=<token>` to `.env`. Do NOT collect the token in chat.
+If credentials already exist, ask whether to keep them or reconfigure them.
 
-**API key:** Tell user to add `ANTHROPIC_API_KEY=<key>` to `.env`.
+Supported credential modes should be described using the actual variables and commands used by this repository. Keep the terminology consistent. Do not mix provider names loosely.
 
-## 5. Set Up Channels
+Rules:
+- never ask the user to paste secrets into chat
+- ask the user to write the chosen secret into `.env`
+- after the user confirms, re-check `.env` locally and continue
 
-AskUserQuestion (multiSelect): Which messaging channels do you want to enable?
-- WhatsApp (authenticates via QR code or pairing code)
-- Telegram (authenticates via bot token from @BotFather)
-- Slack (authenticates via Slack app with Socket Mode)
-- Discord (authenticates via Discord bot token)
+Success criteria:
+- required credential variables are present in `.env`
 
-**Delegate to each selected channel's own skill.** Each channel skill handles its own code installation, authentication, registration, and JID resolution. This avoids duplicating channel-specific logic and ensures JIDs are always correct.
+## 5. Channels
 
-For each selected channel, invoke its skill:
+Ask which messaging channels to enable.
 
-- **WhatsApp:** Invoke `/add-whatsapp`
-- **Telegram:** Invoke `/add-telegram`
-- **Slack:** Invoke `/add-slack`
-- **Discord:** Invoke `/add-discord`
+Supported channels:
+- WhatsApp
+- Telegram
+- Slack
+- Discord
 
-Each skill will:
-1. Install the channel code (via `git merge` of the skill branch)
-2. Collect credentials/tokens and write to `.env`
-3. Authenticate (WhatsApp QR/pairing, or verify token-based connection)
-4. Register the chat with the correct JID format
-5. Build and verify
+Delegate to each channel's own skill instead of duplicating channel-specific setup logic:
+- `/add-whatsapp`
+- `/add-telegram`
+- `/add-slack`
+- `/add-discord`
 
-**After all channel skills complete**, install dependencies and rebuild — channel merges may introduce new packages:
+Each delegated skill is expected to handle:
+1. installing the channel code
+2. collecting or validating channel credentials
+3. authenticating the channel
+4. registering the target chat with the correct identifier
+5. building and verifying its own changes
+
+After all selected channel skills finish, rebuild once:
 
 ```bash
 npm install && npm run build
 ```
 
-If the build fails, read the error output and fix it (usually a missing dependency). Then continue to step 6.
+If the rebuild fails:
+- inspect the error
+- fix the missing dependency or merge issue
+- retry
+
+If a selected channel skill is unavailable:
+- say so clearly
+- skip that channel instead of blocking the rest of setup
+
+Success criteria:
+- at least one selected channel authenticates successfully
+- selected chats are registered when required by the channel
 
 ## 6. Mount Allowlist
 
-AskUserQuestion: Agent access to external directories?
+Ask whether agents should be allowed to access external directories.
 
-**No:** `npx tsx setup/index.ts --step mounts -- --empty`
-**Yes:** Collect paths/permissions. `npx tsx setup/index.ts --step mounts -- --json '{"allowedRoots":[...],"blockedPatterns":[],"nonMainReadOnly":true}'`
+If no:
+
+```bash
+npx tsx setup/index.ts --step mounts -- --empty
+```
+
+If yes:
+- collect the allowed roots and any restrictions
+- apply them with the JSON form expected by the mounts step
+
+Success criteria:
+- mount configuration exists and matches the requested policy
 
 ## 7. Start Service
 
-If service already running: unload first.
-- macOS: `launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist`
-- Linux: `systemctl --user stop nanoclaw` (or `systemctl stop nanoclaw` if root)
+If a stale service is already running, stop or unload it first using the platform-appropriate command.
 
-Run `npx tsx setup/index.ts --step service` and parse the status block.
+Run:
 
-**If FALLBACK=wsl_no_systemd:** WSL without systemd detected. Tell user they can either enable systemd in WSL (`echo -e "[boot]\nsystemd=true" | sudo tee /etc/wsl.conf` then restart WSL) or use the generated `start-nanoclaw.sh` wrapper.
-
-**If DOCKER_GROUP_STALE=true:** The user was added to the docker group after their session started — the systemd service can't reach the Docker socket. Ask user to run these two commands:
-
-1. Immediate fix: `sudo setfacl -m u:$(whoami):rw /var/run/docker.sock`
-2. Persistent fix (re-applies after every Docker restart):
 ```bash
-sudo mkdir -p /etc/systemd/system/docker.service.d
-sudo tee /etc/systemd/system/docker.service.d/socket-acl.conf << 'EOF'
-[Service]
-ExecStartPost=/usr/bin/setfacl -m u:USERNAME:rw /var/run/docker.sock
-EOF
-sudo systemctl daemon-reload
+npx tsx setup/index.ts --step service
 ```
-Replace `USERNAME` with the actual username (from `whoami`). Run the two `sudo` commands separately — the `tee` heredoc first, then `daemon-reload`. After user confirms setfacl ran, re-run the service step.
 
-**If SERVICE_LOADED=false:**
-- Read `logs/setup.log` for the error.
-- macOS: check `launchctl list | grep nanoclaw`. If PID=`-` and status non-zero, read `logs/nanoclaw.error.log`.
-- Linux: check `systemctl --user status nanoclaw`.
-- Re-run the service step after fixing.
+Parse the status block.
+
+Special cases:
+
+- If `FALLBACK=wsl_no_systemd`, explain the two supported paths:
+  - enable systemd in WSL and retry
+  - use the generated `start-nanoclaw.sh` wrapper
+
+- If `DOCKER_GROUP_STALE=true`, explain that the current session cannot yet access the Docker socket reliably. Give the exact remediation steps and then re-run the service step after the user confirms they are complete.
+
+- If `SERVICE_LOADED=false`, inspect the service logs and platform status commands, repair the issue, and retry.
+
+Success criteria:
+- service is loaded
+- service is running
 
 ## 8. Verify
 
-Run `npx tsx setup/index.ts --step verify` and parse the status block.
+Run:
 
-**If STATUS=failed, fix each:**
-- SERVICE=stopped → `npm run build`, then restart: `launchctl kickstart -k gui/$(id -u)/com.nanoclaw` (macOS) or `systemctl --user restart nanoclaw` (Linux) or `bash start-nanoclaw.sh` (WSL nohup)
-- SERVICE=not_found → re-run step 7
-- CREDENTIALS=missing → re-run step 4
-- CHANNEL_AUTH shows `not_found` for any channel → re-invoke that channel's skill (e.g. `/add-telegram`)
-- REGISTERED_GROUPS=0 → re-invoke the channel skills from step 5
-- MOUNT_ALLOWLIST=missing → `npx tsx setup/index.ts --step mounts -- --empty`
+```bash
+npx tsx setup/index.ts --step verify
+```
 
-Tell user to test: send a message in their registered chat. Show: `tail -f logs/nanoclaw.log`
+Parse the result and repair each failed check.
+
+Typical fixes:
+- `SERVICE=stopped`: rebuild if needed, then restart the service
+- `SERVICE=not_found`: re-run step 7
+- `CREDENTIALS=missing`: re-run step 4
+- `CHANNEL_AUTH=not_found`: re-run the relevant channel skill
+- `REGISTERED_GROUPS=0`: re-run the relevant channel skill
+- `MOUNT_ALLOWLIST=missing`: re-run step 6
+
+Setup is complete only when all of the following are true:
+- service is running
+- required credentials are present
+- at least one configured channel is authenticated
+- at least one chat or group is registered
+- mount policy exists
+- container verification passes
+
+At the end, tell the user how to perform a real-world check:
+- send a test message in the registered chat
+- watch runtime logs with `tail -f logs/nanoclaw.log`
 
 ## Troubleshooting
 
-**Service not starting:** Check `logs/nanoclaw.error.log`. Common: wrong Node path (re-run step 7), missing `.env` (step 4), missing channel credentials (re-invoke channel skill).
+**Service not starting**
+- inspect `logs/nanoclaw.error.log`
+- check for wrong Node path, missing `.env`, or missing channel credentials
+- re-run the service step after fixing the cause
 
-**Container agent fails ("Codex process exited with code 1"):** Ensure the container runtime is running — `open -a Docker` (macOS Docker), `container system start` (Apple Container), or `sudo systemctl start docker` (Linux). Check container logs in `groups/main/logs/container-*.log`.
+**Container agent fails**
+- confirm the selected runtime is actually running
+- inspect `groups/main/logs/container-*.log`
+- retry the container step after the runtime is healthy
 
-**No response to messages:** Check trigger pattern. Main channel doesn't need prefix. Check DB: `npx tsx setup/index.ts --step verify`. Check `logs/nanoclaw.log`.
+**No response to messages**
+- verify trigger pattern and main-channel behavior
+- run the verify step
+- inspect `logs/nanoclaw.log`
 
-**Channel not connecting:** Verify the channel's credentials are set in `.env`. Channels auto-enable when their credentials are present. For WhatsApp: check `store/auth/creds.json` exists. For token-based channels: check token values in `.env`. Restart the service after any `.env` change.
+**Channel not connecting**
+- confirm the required credentials are present in `.env`
+- confirm channel-specific auth artifacts exist when applicable
+- restart the service after any `.env` change
 
-**Unload service:** macOS: `launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist` | Linux: `systemctl --user stop nanoclaw`
+## Notes for the Agent
+
+- Favor progress over explanation. Fix what is fixable and move on.
+- Be conservative with repository-shaping operations and credential changes.
+- Treat this skill as an orchestrator. Use channel skills and runtime-conversion skills rather than copying their internals here.

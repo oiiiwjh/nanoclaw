@@ -119,6 +119,71 @@ function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
 }
 
+function loadOptionalText(filePath: string): string | undefined {
+  if (!fs.existsSync(filePath)) return undefined;
+  const text = fs.readFileSync(filePath, 'utf-8').trim();
+  return text || undefined;
+}
+
+function buildCodexPrompt(
+  prompt: string,
+  containerInput: ContainerInput,
+  sessionId?: string,
+): string {
+  const rules = [
+    'You are replying directly as the assistant inside the current chat.',
+    'Do not draft a message for the user to send to someone else unless the user explicitly asks for a draft.',
+    'Do not prefix your reply with @mentions, usernames, or quoted reply suggestions unless explicitly asked.',
+    'If the user asks for a reminder, follow-up, recurring check, or future notification, use the nanoclaw MCP scheduling tools instead of only describing what they could say later.',
+    'If you successfully schedule a task, briefly confirm what was scheduled and when.',
+    'Use send_message only for immediate progress updates or truly multi-part replies; otherwise, return the final answer normally.',
+    'Keep replies natural for a chat app. Avoid meta-instructions like "you can directly reply".',
+  ];
+
+  const parts = [
+    '<assistant_rules>',
+    ...rules.map((rule) => `- ${rule}`),
+    '</assistant_rules>',
+  ];
+
+  if (!sessionId) {
+    const groupMemory = loadOptionalText('/workspace/group/CLAUDE.md');
+    const globalMemory = loadOptionalText('/workspace/global/CLAUDE.md');
+
+    if (groupMemory) {
+      parts.push('<group_memory>', groupMemory, '</group_memory>');
+    }
+    if (globalMemory) {
+      parts.push('<global_memory>', globalMemory, '</global_memory>');
+    }
+  }
+
+  if (containerInput.isScheduledTask) {
+    parts.push(
+      '[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]',
+    );
+  }
+
+  parts.push(prompt);
+  return parts.join('\n\n');
+}
+
+function buildCodexConfigArgs(
+  mcpServerPath: string,
+  containerInput: ContainerInput,
+): string[] {
+  const envInlineTable = `{NANOCLAW_CHAT_JID=${JSON.stringify(containerInput.chatJid)},NANOCLAW_GROUP_FOLDER=${JSON.stringify(containerInput.groupFolder)},NANOCLAW_IS_MAIN=${JSON.stringify(containerInput.isMain ? '1' : '0')}}`;
+
+  return [
+    '-c',
+    'mcp_servers.nanoclaw.command="node"',
+    '-c',
+    `mcp_servers.nanoclaw.args=[${JSON.stringify(mcpServerPath)}]`,
+    '-c',
+    `mcp_servers.nanoclaw.env=${envInlineTable}`,
+  ];
+}
+
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
   const projectDir = path.dirname(transcriptPath);
   const indexPath = path.join(projectDir, 'sessions-index.json');
@@ -326,16 +391,25 @@ function waitForIpcMessage(): Promise<string | null> {
 }
 
 function prepareCodexHome(): void {
-  const sourceDir = '/workspace/codex-auth';
-  const targetDir = '/home/node/.codex';
+  const codexDir = '/home/node/.codex';
+  fs.mkdirSync(codexDir, { recursive: true });
+  const authPath = path.join(codexDir, 'auth.json');
+  if (!fs.existsSync(authPath)) return;
 
-  if (!fs.existsSync(sourceDir)) return;
-
-  fs.mkdirSync(targetDir, { recursive: true });
-  for (const entry of fs.readdirSync(sourceDir)) {
-    const src = path.join(sourceDir, entry);
-    const dst = path.join(targetDir, entry);
-    fs.cpSync(src, dst, { recursive: true });
+  try {
+    const auth = JSON.parse(fs.readFileSync(authPath, 'utf-8')) as {
+      auth_mode?: string;
+      OPENAI_API_KEY?: string;
+    };
+    if (auth.auth_mode === 'apikey' && auth.OPENAI_API_KEY) {
+      process.env.OPENAI_API_KEY = auth.OPENAI_API_KEY;
+    }
+  } catch (err) {
+    log(
+      `Failed to parse Codex auth.json: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   }
 }
 
@@ -483,24 +557,27 @@ async function runClaudeQuery(
 async function runCodexQuery(
   prompt: string,
   sessionId: string | undefined,
+  mcpServerPath: string,
+  containerInput: ContainerInput,
 ): Promise<{
   newSessionId?: string;
   lastAssistantUuid?: string;
   closedDuringQuery: boolean;
 }> {
+  const configArgs = buildCodexConfigArgs(mcpServerPath, containerInput);
   const args = sessionId
     ? [
+        ...configArgs,
         'exec',
         'resume',
         '--json',
         '--skip-git-repo-check',
         '--dangerously-bypass-approvals-and-sandbox',
-        '--cd',
-        '/workspace/group',
         sessionId,
         '-',
       ]
     : [
+        ...configArgs,
         'exec',
         '--json',
         '--skip-git-repo-check',
@@ -516,7 +593,7 @@ async function runCodexQuery(
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
-  child.stdin.write(prompt);
+  child.stdin.write(buildCodexPrompt(prompt, containerInput, sessionId));
   child.stdin.end();
 
   let stdoutBuffer = '';
@@ -629,9 +706,6 @@ async function main(): Promise<void> {
 
   // Build initial prompt (drain any pending IPC messages too)
   let prompt = containerInput.prompt;
-  if (containerInput.isScheduledTask) {
-    prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
-  }
   const pending = drainIpcInput();
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
@@ -646,7 +720,12 @@ async function main(): Promise<void> {
 
       const queryResult =
         AGENT_PROVIDER === 'codex'
-          ? await runCodexQuery(prompt, sessionId)
+          ? await runCodexQuery(
+              prompt,
+              sessionId,
+              mcpServerPath,
+              containerInput,
+            )
           : await runClaudeQuery(
               prompt,
               sessionId,

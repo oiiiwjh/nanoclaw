@@ -109,6 +109,60 @@ From the main channel (your self-chat), you can manage groups and tasks:
 @Andy join the Family Chat group
 ```
 
+### Slack / Chat Commands
+
+If your main channel is on Slack, you can say the same things there. Typical task-management commands:
+
+```text
+@Andy list all scheduled tasks across groups
+@Andy list all scheduled tasks
+@Andy pause task task-123
+@Andy resume task task-123
+@Andy cancel task task-123
+@Andy remind me at 10pm to stop working
+@Andy every weekday at 9am send me a standup reminder
+```
+
+If the main channel is configured with `requiresTrigger: false`, plain messages also work:
+
+```text
+list all scheduled tasks
+remind me at 10pm to stop working
+```
+
+### Viewing Tasks From the Terminal
+
+You can inspect scheduled tasks directly from SQLite:
+
+```bash
+sqlite3 -header -column store/messages.db "
+  SELECT id, group_jid, schedule_type, schedule_value, status, next_run, prompt
+  FROM tasks
+  ORDER BY created_at DESC;
+"
+```
+
+Useful filtered views:
+
+```bash
+# Only active tasks
+sqlite3 -header -column store/messages.db "
+  SELECT id, group_jid, schedule_type, schedule_value, next_run, prompt
+  FROM tasks
+  WHERE status = 'active'
+  ORDER BY next_run ASC;
+"
+```
+
+```bash
+# One task by id
+sqlite3 -header -column store/messages.db "
+  SELECT *
+  FROM tasks
+  WHERE id = 'task-123';
+"
+```
+
 ## Customizing
 
 NanoClaw doesn't use configuration files. To make changes, just tell Claude Code what you want:
@@ -160,7 +214,7 @@ Single Node.js process. Channels are added via skills and self-register at start
 NanoClaw supports two backends:
 
 - `claude` - the original path, using Claude Code plus the Claude Agent SDK
-- `codex` - OpenAI Codex CLI, reusing your local `codex login`
+- `codex` - OpenAI Codex CLI
 
 Set the default backend in `.env`:
 
@@ -187,12 +241,109 @@ Advanced users can also override the backend per group by setting `containerConf
 
 ### Codex Usage
 
-1. Run `codex login`
-2. Verify with `codex login status`
-3. Set `AGENT_PROVIDER=codex` in `.env`
-4. Start or restart NanoClaw
+1. Set `AGENT_PROVIDER=codex` in `.env`
+2. Pick a Codex auth mode:
 
-Codex mode uses the host login stored in `~/.codex/auth.json` and copies it into each group's isolated session directory before starting the container.
+API key mode:
+
+```bash
+CODEX_AUTH_MODE=openai
+OPENAI_API_KEY=...
+```
+
+ChatGPT/Codex OAuth mode:
+
+```bash
+CODEX_AUTH_MODE=openai-codex
+```
+
+In OAuth mode, NanoClaw reuses your host `codex login` state by copying the required OAuth tokens into each group's isolated `.codex/` home, and mirrors session history back into the host `~/.codex` so the Codex app can see those sessions.
+
+If `CODEX_AUTH_MODE` is omitted, NanoClaw auto-detects:
+- `openai-codex` when `~/.codex/auth.json` contains a ChatGPT OAuth login
+- otherwise `openai`
+
+Advanced users can also override the Codex auth mode per group with `containerConfig.codexAuthMode`.
+
+Examples:
+
+```bash
+# Codex with API key
+AGENT_PROVIDER=codex
+CODEX_AUTH_MODE=openai
+OPENAI_API_KEY=...
+```
+
+```bash
+# Codex with ChatGPT/Codex OAuth
+AGENT_PROVIDER=codex
+CODEX_AUTH_MODE=openai-codex
+```
+
+## Starting NanoClaw
+
+### Enable Startup Persistence (macOS)
+
+Enable NanoClaw as a `launchd` service that starts automatically after login:
+
+```bash
+npm run build
+launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist || true
+launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
+launchctl kickstart -k gui/$(id -u)/com.nanoclaw
+```
+
+Check service status:
+
+```bash
+launchctl print gui/$(id -u)/com.nanoclaw | sed -n '1,80p'
+```
+
+### Disable Startup Persistence (macOS)
+
+Stop the `launchd` service and disable auto-start:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
+```
+
+### Start Temporarily (Foreground)
+
+Use this when you want the fastest way to bring NanoClaw up and watch logs directly:
+
+```bash
+npm run build
+node dist/index.js
+```
+
+Stop the foreground process:
+
+```bash
+Ctrl+C
+```
+
+### Start Temporarily (Background)
+
+If you want it running only for the current session without enabling startup persistence:
+
+```bash
+npm run build
+nohup node dist/index.js >> ~/Library/Logs/nanoclaw/manual.log 2>> ~/Library/Logs/nanoclaw/manual.error.log < /dev/null &
+```
+
+Stop the temporary background process:
+
+```bash
+pkill -f 'node dist/index.js'
+```
+
+### Development
+
+Use hot reload during local development:
+
+```bash
+npm run dev
+```
 
 For the full architecture details, see [docs/SPEC.md](docs/SPEC.md).
 

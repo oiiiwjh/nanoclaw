@@ -13,7 +13,9 @@ import Database from 'better-sqlite3';
 
 import {
   getConfiguredAgentProvider,
-  hasCodexAuth,
+  hasCodexApiKeyAuth,
+  getConfiguredCodexAuthMode,
+  hasCodexOAuthAuth,
 } from '../src/agent-provider.js';
 import { STORE_DIR } from '../src/config.js';
 import { readEnvFile } from '../src/env.js';
@@ -105,7 +107,25 @@ export async function run(_args: string[]): Promise<void> {
   const provider = getConfiguredAgentProvider();
   const envFile = path.join(projectRoot, '.env');
   if (provider === 'codex') {
-    credentials = hasCodexAuth(homeDir) ? 'configured' : 'missing';
+    const envContent = fs.existsSync(envFile)
+      ? fs.readFileSync(envFile, 'utf-8')
+      : '';
+    const codexAuthMode = getConfiguredCodexAuthMode();
+    if (codexAuthMode === 'openai-codex') {
+      credentials = hasCodexOAuthAuth(homeDir) ? 'configured' : 'missing';
+    } else if (codexAuthMode === 'openai') {
+      credentials =
+        /^(OPENAI_API_KEY)=/m.test(envContent) || hasCodexApiKeyAuth(homeDir)
+          ? 'configured'
+          : 'missing';
+    } else {
+      credentials =
+        /^(OPENAI_API_KEY)=/m.test(envContent) ||
+        hasCodexApiKeyAuth(homeDir) ||
+        hasCodexOAuthAuth(homeDir)
+          ? 'configured'
+          : 'missing';
+    }
   } else if (fs.existsSync(envFile)) {
     const envContent = fs.readFileSync(envFile, 'utf-8');
     if (
