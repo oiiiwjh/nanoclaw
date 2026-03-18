@@ -4,8 +4,13 @@
  */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
+import {
+  AgentProvider,
+  resolveAgentProvider,
+} from './agent-provider.js';
 import {
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
@@ -59,6 +64,7 @@ interface VolumeMount {
 function buildVolumeMounts(
   group: RegisteredGroup,
   isMain: boolean,
+  provider: AgentProvider,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   const projectRoot = process.cwd();
@@ -163,6 +169,34 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  if (provider === 'codex') {
+    const hostCodexDir = path.join(os.homedir(), '.codex');
+    const groupCodexDir = path.join(DATA_DIR, 'sessions', group.folder, '.codex');
+    fs.mkdirSync(groupCodexDir, { recursive: true });
+
+    for (const file of ['auth.json', 'config.toml', 'version.json']) {
+      const src = path.join(hostCodexDir, file);
+      const dst = path.join(groupCodexDir, file);
+      if (fs.existsSync(src)) {
+        fs.copyFileSync(src, dst);
+      }
+    }
+
+    for (const dir of ['rules', 'skills']) {
+      const src = path.join(hostCodexDir, dir);
+      const dst = path.join(groupCodexDir, dir);
+      if (fs.existsSync(src) && fs.statSync(src).isDirectory()) {
+        fs.cpSync(src, dst, { recursive: true });
+      }
+    }
+
+    mounts.push({
+      hostPath: groupCodexDir,
+      containerPath: '/workspace/codex-auth',
+      readonly: true,
+    });
+  }
+
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
   const groupIpcDir = resolveGroupIpcPath(group.folder);
@@ -215,27 +249,31 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  provider: AgentProvider,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+  args.push('-e', `NANOCLAW_AGENT_PROVIDER=${provider}`);
 
-  // Route API traffic through the credential proxy (containers never see real secrets)
-  args.push(
-    '-e',
-    `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
-  );
+  if (provider === 'claude') {
+    // Route API traffic through the credential proxy (containers never see real secrets)
+    args.push(
+      '-e',
+      `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
+    );
 
-  // Mirror the host's auth method with a placeholder value.
-  // API key mode: SDK sends x-api-key, proxy replaces with real key.
-  // OAuth mode:   SDK exchanges placeholder token for temp API key,
-  //               proxy injects real OAuth token on that exchange request.
-  const authMode = detectAuthMode();
-  if (authMode === 'api-key') {
-    args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
-  } else {
-    args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    // Mirror the host's auth method with a placeholder value.
+    // API key mode: SDK sends x-api-key, proxy replaces with real key.
+    // OAuth mode:   SDK exchanges placeholder token for temp API key,
+    //               proxy injects real OAuth token on that exchange request.
+    const authMode = detectAuthMode();
+    if (authMode === 'api-key') {
+      args.push('-e', 'ANTHROPIC_API_KEY=placeholder');
+    } else {
+      args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+    }
   }
 
   // Runtime-specific args for host gateway resolution
@@ -275,14 +313,16 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   fs.mkdirSync(groupDir, { recursive: true });
 
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const provider = resolveAgentProvider(group);
+  const mounts = buildVolumeMounts(group, input.isMain, provider);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(mounts, containerName, provider);
 
   logger.debug(
     {
       group: group.name,
+      provider,
       containerName,
       mounts: mounts.map(
         (m) =>
@@ -296,6 +336,7 @@ export async function runContainerAgent(
   logger.info(
     {
       group: group.name,
+      provider,
       containerName,
       mountCount: mounts.length,
       isMain: input.isMain,

@@ -38,7 +38,7 @@ curl -fsSL https://nanoclaw.dev/install-docker-sandboxes-windows.sh | bash
 
 [OpenClaw](https://github.com/openclaw/openclaw) is an impressive project, but I wouldn't have been able to sleep if I had given complex software I didn't understand full access to my life. OpenClaw has nearly half a million lines of code, 53 config files, and 70+ dependencies. Its security is at the application level (allowlists, pairing codes) rather than true OS-level isolation. Everything runs in one Node process with shared memory.
 
-NanoClaw provides that same core functionality, but in a codebase small enough to understand: one process and a handful of files. Claude agents run in their own Linux containers with filesystem isolation, not merely behind permission checks.
+NanoClaw provides that same core functionality, but in a codebase small enough to understand: one process and a handful of files. Agents run in their own Linux containers with filesystem isolation, not merely behind permission checks.
 
 ## Quick Start
 
@@ -73,20 +73,20 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 **Customization = code changes.** No configuration sprawl. Want different behavior? Modify the code. The codebase is small enough that it's safe to make changes.
 
 **AI-native.**
-- No installation wizard; Claude Code guides setup.
-- No monitoring dashboard; ask Claude what's happening.
-- No debugging tools; describe the problem and Claude fixes it.
+- No installation wizard; your chosen agent CLI guides setup.
+- No monitoring dashboard; ask the agent what's happening.
+- No debugging tools; describe the problem and the agent fixes it.
 
 **Skills over features.** Instead of adding features (e.g. support for Telegram) to the codebase, contributors submit [claude code skills](https://code.claude.com/docs/en/skills) like `/add-telegram` that transform your fork. You end up with clean code that does exactly what you need.
 
-**Best harness, best model.** NanoClaw runs on the Claude Agent SDK, which means you're running Claude Code directly. Claude Code is highly capable and its coding and problem-solving capabilities allow it to modify and expand NanoClaw and tailor it to each user.
+**Best harness, best model.** NanoClaw keeps Claude support intact and can also run Codex. You choose the agent backend per install, and can override it per registered group if you want different channels to use different models.
 
 ## What It Supports
 
 - **Multi-channel messaging** - Talk to your assistant from WhatsApp, Telegram, Discord, Slack, or Gmail. Add channels with skills like `/add-whatsapp` or `/add-telegram`. Run one or many at the same time.
 - **Isolated group context** - Each group has its own `CLAUDE.md` memory, isolated filesystem, and runs in its own container sandbox with only that filesystem mounted to it.
 - **Main channel** - Your private channel (self-chat) for admin control; every group is completely isolated
-- **Scheduled tasks** - Recurring jobs that run Claude and can message you back
+- **Scheduled tasks** - Recurring jobs that run the selected agent backend and can message you back
 - **Web access** - Search and fetch content from the Web
 - **Container isolation** - Agents are sandboxed in [Docker Sandboxes](https://nanoclaw.dev/blog/nanoclaw-docker-sandboxes) (micro VM isolation), Apple Container (macOS), or Docker (macOS/Linux)
 - **Agent Swarms** - Spin up teams of specialized agents that collaborate on complex tasks
@@ -150,10 +150,49 @@ Skills we'd like to see:
 ## Architecture
 
 ```
-Channels --> SQLite --> Polling loop --> Container (Claude Agent SDK) --> Response
+Channels --> SQLite --> Polling loop --> Container (Claude SDK or Codex CLI) --> Response
 ```
 
 Single Node.js process. Channels are added via skills and self-register at startup — the orchestrator connects whichever ones have credentials present. Agents execute in isolated Linux containers with filesystem isolation. Only mounted directories are accessible. Per-group message queue with concurrency control. IPC via filesystem.
+
+## Agent Backends
+
+NanoClaw supports two backends:
+
+- `claude` - the original path, using Claude Code plus the Claude Agent SDK
+- `codex` - OpenAI Codex CLI, reusing your local `codex login`
+
+Set the default backend in `.env`:
+
+```bash
+AGENT_PROVIDER=claude
+```
+
+or:
+
+```bash
+AGENT_PROVIDER=codex
+```
+
+Advanced users can also override the backend per group by setting `containerConfig.agentProvider` in the registered group record.
+
+### Claude Usage
+
+1. Set `AGENT_PROVIDER=claude` in `.env`
+2. Configure one of:
+   - `CLAUDE_CODE_OAUTH_TOKEN=...`
+   - `ANTHROPIC_API_KEY=...`
+   - `ANTHROPIC_AUTH_TOKEN=...`
+3. Start or restart NanoClaw
+
+### Codex Usage
+
+1. Run `codex login`
+2. Verify with `codex login status`
+3. Set `AGENT_PROVIDER=codex` in `.env`
+4. Start or restart NanoClaw
+
+Codex mode uses the host login stored in `~/.codex/auth.json` and copies it into each group's isolated session directory before starting the container.
 
 For the full architecture details, see [docs/SPEC.md](docs/SPEC.md).
 
@@ -188,7 +227,7 @@ We don't want configuration sprawl. Every user should customize NanoClaw so that
 
 **Can I use third-party or open-source models?**
 
-Yes. NanoClaw supports any Claude API-compatible model endpoint. Set these environment variables in your `.env` file:
+Yes. In Claude mode, NanoClaw supports any Claude API-compatible model endpoint. Set these environment variables in your `.env` file:
 
 ```bash
 ANTHROPIC_BASE_URL=https://your-api-endpoint.com

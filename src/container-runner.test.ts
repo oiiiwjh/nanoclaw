@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
+import { spawn } from 'child_process';
 
 // Sentinel markers must match container-runner.ts
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
@@ -119,6 +120,7 @@ describe('container-runner timeout behavior', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    delete process.env.AGENT_PROVIDER;
   });
 
   it('timeout after output resolves as success', async () => {
@@ -206,5 +208,32 @@ describe('container-runner timeout behavior', () => {
     const result = await resultPromise;
     expect(result.status).toBe('success');
     expect(result.newSessionId).toBe('session-456');
+  });
+
+  it('uses codex provider env without anthopic proxy placeholders', async () => {
+    process.env.AGENT_PROVIDER = 'codex';
+    const resultPromise = runContainerAgent(
+      testGroup,
+      testInput,
+      () => {},
+      vi.fn(async () => {}),
+    );
+
+    const spawnArgs = vi.mocked(spawn).mock.calls.at(-1)?.[1] as string[];
+    expect(spawnArgs).toContain('NANOCLAW_AGENT_PROVIDER=codex');
+    expect(spawnArgs).not.toContain('ANTHROPIC_API_KEY=placeholder');
+    expect(spawnArgs).not.toContain('CLAUDE_CODE_OAUTH_TOKEN=placeholder');
+
+    emitOutputMarker(fakeProc, {
+      status: 'success',
+      result: 'Done',
+      newSessionId: 'session-codex',
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    fakeProc.emit('close', 0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    const result = await resultPromise;
+    expect(result.newSessionId).toBe('session-codex');
   });
 });

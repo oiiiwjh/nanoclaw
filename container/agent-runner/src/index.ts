@@ -16,6 +16,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { spawn } from 'child_process';
 import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 
@@ -57,6 +58,7 @@ interface SDKUserMessage {
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
+const AGENT_PROVIDER = process.env.NANOCLAW_AGENT_PROVIDER === 'codex' ? 'codex' : 'claude';
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -323,13 +325,27 @@ function waitForIpcMessage(): Promise<string | null> {
   });
 }
 
+function prepareCodexHome(): void {
+  const sourceDir = '/workspace/codex-auth';
+  const targetDir = '/home/node/.codex';
+
+  if (!fs.existsSync(sourceDir)) return;
+
+  fs.mkdirSync(targetDir, { recursive: true });
+  for (const entry of fs.readdirSync(sourceDir)) {
+    const src = path.join(sourceDir, entry);
+    const dst = path.join(targetDir, entry);
+    fs.cpSync(src, dst, { recursive: true });
+  }
+}
+
 /**
  * Run a single query and stream results via writeOutput.
  * Uses MessageStream (AsyncIterable) to keep isSingleUserTurn=false,
  * allowing agent teams subagents to run to completion.
  * Also pipes IPC messages into the stream during the query.
  */
-async function runQuery(
+async function runClaudeQuery(
   prompt: string,
   sessionId: string | undefined,
   mcpServerPath: string,
@@ -464,6 +480,119 @@ async function runQuery(
   return { newSessionId, lastAssistantUuid, closedDuringQuery };
 }
 
+async function runCodexQuery(
+  prompt: string,
+  sessionId: string | undefined,
+): Promise<{
+  newSessionId?: string;
+  lastAssistantUuid?: string;
+  closedDuringQuery: boolean;
+}> {
+  const args = sessionId
+    ? [
+        'exec',
+        'resume',
+        '--json',
+        '--skip-git-repo-check',
+        '--dangerously-bypass-approvals-and-sandbox',
+        '--cd',
+        '/workspace/group',
+        sessionId,
+        '-',
+      ]
+    : [
+        'exec',
+        '--json',
+        '--skip-git-repo-check',
+        '--dangerously-bypass-approvals-and-sandbox',
+        '--cd',
+        '/workspace/group',
+        '-',
+      ];
+
+  const child = spawn('codex', args, {
+    cwd: '/workspace/group',
+    env: process.env,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  child.stdin.write(prompt);
+  child.stdin.end();
+
+  let stdoutBuffer = '';
+  let stderrBuffer = '';
+  let newSessionId = sessionId;
+  let lastMessage: string | null = null;
+
+  const parseStdout = (chunk: string) => {
+    stdoutBuffer += chunk;
+    const lines = stdoutBuffer.split('\n');
+    stdoutBuffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      try {
+        const event = JSON.parse(trimmed) as {
+          type?: string;
+          thread_id?: string;
+          item?: { type?: string; text?: string };
+        };
+
+        if (event.type === 'thread.started' && event.thread_id) {
+          newSessionId = event.thread_id;
+          log(`Codex thread initialized: ${newSessionId}`);
+        }
+
+        if (
+          event.type === 'item.completed' &&
+          event.item?.type === 'agent_message'
+        ) {
+          lastMessage = event.item.text || null;
+        }
+      } catch {
+        log(`Ignoring non-JSON Codex stdout: ${trimmed}`);
+      }
+    }
+  };
+
+  child.stdout.on('data', (data) => parseStdout(data.toString()));
+  child.stderr.on('data', (data) => {
+    const chunk = data.toString();
+    stderrBuffer += chunk;
+    for (const line of chunk.trim().split('\n')) {
+      if (line) log(`[codex] ${line}`);
+    }
+  });
+
+  const exitCode = await new Promise<number>((resolve, reject) => {
+    child.on('error', reject);
+    child.on('close', (code) => resolve(code ?? 0));
+  });
+
+  if (stdoutBuffer.trim()) {
+    parseStdout('\n');
+  }
+
+  if (exitCode !== 0) {
+    throw new Error(
+      stderrBuffer.trim() || `Codex exited with code ${exitCode}`,
+    );
+  }
+
+  writeOutput({
+    status: 'success',
+    result: lastMessage,
+    newSessionId,
+  });
+
+  return {
+    newSessionId,
+    closedDuringQuery: false,
+  };
+}
+
 async function main(): Promise<void> {
   let containerInput: ContainerInput;
 
@@ -484,6 +613,10 @@ async function main(): Promise<void> {
   // Credentials are injected by the host's credential proxy via ANTHROPIC_BASE_URL.
   // No real secrets exist in the container environment.
   const sdkEnv: Record<string, string | undefined> = { ...process.env };
+
+  if (AGENT_PROVIDER === 'codex') {
+    prepareCodexHome();
+  }
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   const mcpServerPath = path.join(__dirname, 'ipc-mcp-stdio.js');
@@ -511,7 +644,17 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult =
+        AGENT_PROVIDER === 'codex'
+          ? await runCodexQuery(prompt, sessionId)
+          : await runClaudeQuery(
+              prompt,
+              sessionId,
+              mcpServerPath,
+              containerInput,
+              sdkEnv,
+              resumeAt,
+            );
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
