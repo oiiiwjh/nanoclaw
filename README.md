@@ -163,6 +163,18 @@ sqlite3 -header -column store/messages.db "
 "
 ```
 
+If you want to inspect the whole database as JSON instead of raw SQL rows:
+
+```bash
+npm run db:json
+```
+
+That writes `store/messages.json`. You can also override input/output paths:
+
+```bash
+tsx scripts/export-messages-db.ts store/messages.db /tmp/messages.json
+```
+
 ## Customizing
 
 NanoClaw doesn't use configuration files. To make changes, just tell Claude Code what you want:
@@ -193,6 +205,138 @@ Skills we'd like to see:
 
 **Session Management**
 - `/clear` - Add a `/clear` command that compacts the conversation (summarizes context while preserving critical information in the same session). Requires figuring out how to trigger compaction programmatically via the Claude Agent SDK.
+
+## GitHub Workflows
+
+NanoClaw currently includes five GitHub Actions workflows in `.github/workflows`:
+
+```mermaid
+flowchart LR
+  PR["Pull request to main"] --> CI["CI"]
+  PushMain["Push to main"] --> MF["Merge-forward skill branches"]
+  PushCode["Push to main touching src/container/etc."] --> BV["Bump version"]
+  PushCode --> UT["Update token count"]
+  Manual["Manual run"] --> FS["Sync upstream & merge-forward skill branches"]
+  Manual --> UT
+```
+
+### CI
+
+File: `.github/workflows/ci.yml`
+
+Trigger:
+- Pull requests targeting `main`
+
+What it does:
+- Installs dependencies with `npm ci`
+- Runs formatting checks
+- Runs TypeScript typechecking
+- Runs the test suite with Vitest
+
+Use this when:
+- You want PR validation before merging into `main`
+
+### Bump version
+
+File: `.github/workflows/bump-version.yml`
+
+Trigger:
+- Pushes to `main` that change `src/**` or `container/**`
+
+What it does:
+- Creates a GitHub App token
+- Bumps the patch version in `package.json`
+- Commits the version change
+- Pushes the commit back to `main`
+
+Notes:
+- Requires `APP_ID` and `APP_PRIVATE_KEY` repository secrets
+- Intended for repositories where direct pushes to `main` are allowed for the bot
+
+Use this when:
+- You want releases or deployable changes on `main` to automatically advance the patch version
+
+### Update token count
+
+File: `.github/workflows/update-tokens.yml`
+
+Trigger:
+- Manual run with `workflow_dispatch`
+- Pushes to `main` that change `src/**`, `container/**`, `launchd/**`, or `CLAUDE.md`
+
+What it does:
+- Recomputes repository token statistics
+- Updates `repo-tokens/badge.svg`
+- Commits any resulting changes to `README.md` and the badge
+
+Notes:
+- Requires `APP_ID` and `APP_PRIVATE_KEY` repository secrets
+- Useful after significant source or prompt-surface changes
+
+Use this when:
+- You want the README badge and token counts refreshed immediately without waiting for another qualifying push
+
+### Merge-forward skill branches
+
+File: `.github/workflows/merge-forward-skills.yml`
+
+Trigger:
+- Every push to `main`
+
+What it does:
+- Runs only in the upstream repository `qwibitai/nanoclaw`
+- Merges `main` into every remote `skill/*` branch
+- Builds and tests each branch after merge
+- Pushes successful merges
+- Opens an issue if a skill branch fails due to merge conflicts, build failures, or test failures
+- Notifies channel fork repositories that upstream `main` changed
+
+Use this when:
+- You are maintaining the upstream repository and want all skill branches kept current with `main`
+
+### Sync upstream & merge-forward skill branches
+
+File: `.github/workflows/fork-sync-skills.yml`
+
+Trigger:
+- Manual run with `workflow_dispatch`
+
+What it does:
+- Runs only in forks, not in `qwibitai/nanoclaw`
+- Fetches `qwibitai/nanoclaw` as `upstream`
+- Merges `upstream/main` into the fork's `main`
+- Builds and tests the updated `main`
+- Pushes the synced `main`
+- Then merges the fork's `main` into every `skill/*` branch
+- Opens issues if upstream sync or skill branch merge-forward fails
+
+Use this when:
+- You maintain a fork and want to pull upstream changes plus propagate them into your fork's skill branches in one action
+
+### How to run the manual workflows
+
+From the GitHub web UI:
+
+1. Open the repository on GitHub.
+2. Go to `Actions`.
+3. Select either `Update token count` or `Sync upstream & merge-forward skill branches`.
+4. Click `Run workflow`.
+5. Choose the target branch, usually `main`.
+
+From GitHub CLI:
+
+```bash
+gh workflow run update-tokens.yml
+gh workflow run fork-sync-skills.yml
+```
+
+### Which workflow to use
+
+- Updating a PR and want validation: use `CI`
+- Merged code into `main` and want version bumping handled automatically: `Bump version` does it
+- Want to refresh the token badge right now: run `Update token count`
+- Maintaining the upstream repo and want skill branches advanced automatically: `Merge-forward skill branches`
+- Maintaining a fork and want to sync from upstream plus advance skill branches: run `Sync upstream & merge-forward skill branches`
 
 ## Requirements
 
