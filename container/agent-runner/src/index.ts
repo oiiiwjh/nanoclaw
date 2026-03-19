@@ -125,6 +125,13 @@ function loadOptionalText(filePath: string): string | undefined {
   return text || undefined;
 }
 
+function loadGlobalMemory(): string | undefined {
+  return (
+    loadOptionalText('/workspace/global/CLAUDE.md') ||
+    loadOptionalText('/workspace/project/groups/global/CLAUDE.md')
+  );
+}
+
 function buildCodexPrompt(
   prompt: string,
   containerInput: ContainerInput,
@@ -148,7 +155,7 @@ function buildCodexPrompt(
 
   if (!sessionId) {
     const groupMemory = loadOptionalText('/workspace/group/CLAUDE.md');
-    const globalMemory = loadOptionalText('/workspace/global/CLAUDE.md');
+    const globalMemory = loadGlobalMemory();
 
     if (groupMemory) {
       parts.push('<group_memory>', groupMemory, '</group_memory>');
