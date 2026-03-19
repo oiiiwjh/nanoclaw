@@ -258,12 +258,17 @@ function buildVolumeMounts(
       }
     }
 
-    for (const dir of ['rules', 'skills']) {
-      const src = path.join(hostCodexDir, dir);
-      const dst = path.join(groupCodexDir, dir);
-      if (fs.existsSync(src) && fs.statSync(src).isDirectory()) {
-        fs.cpSync(src, dst, { recursive: true });
-      }
+    const rulesSrc = path.join(hostCodexDir, 'rules');
+    const rulesDst = path.join(groupCodexDir, 'rules');
+    if (fs.existsSync(rulesSrc) && fs.statSync(rulesSrc).isDirectory()) {
+      fs.cpSync(rulesSrc, rulesDst, { recursive: true });
+    }
+
+    const hostAgentsDir = path.join(os.homedir(), '.agents');
+    const skillsSrc = path.join(hostAgentsDir, 'skills');
+    const skillsDst = path.join(groupCodexDir, 'skills');
+    if (fs.existsSync(skillsSrc) && fs.statSync(skillsSrc).isDirectory()) {
+      fs.cpSync(skillsSrc, skillsDst, { recursive: true });
     }
 
     const authPath = path.join(groupCodexDir, 'auth.json');

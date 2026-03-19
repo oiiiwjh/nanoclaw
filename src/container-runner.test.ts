@@ -59,6 +59,7 @@ vi.mock('fs', async () => {
       readFileSync: vi.fn((file: string) => mockFiles.get(file) ?? ''),
       readdirSync: vi.fn(() => []),
       statSync: vi.fn(() => ({ isDirectory: () => false })),
+      cpSync: vi.fn(),
       copyFileSync: vi.fn(),
     },
   };
@@ -135,6 +136,7 @@ describe('container-runner timeout behavior', () => {
     fakeProc = createFakeProcess();
     for (const key of Object.keys(mockEnv)) delete mockEnv[key];
     mockFiles.clear();
+    vi.mocked(fs.cpSync).mockClear();
     vi.mocked(fs.writeFileSync).mockClear();
     vi.mocked(fs.copyFileSync).mockClear();
   });
@@ -332,6 +334,50 @@ describe('container-runner timeout behavior', () => {
         status: 'success',
         result: 'Done',
         newSessionId: 'session-oauth',
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      fakeProc.emit('close', 0);
+      await vi.advanceTimersByTimeAsync(10);
+
+      await resultPromise;
+    } finally {
+      osSpy.mockRestore();
+    }
+  });
+
+  it('copies codex skills from ~/.agents/skills into the group session', async () => {
+    process.env.AGENT_PROVIDER = 'codex';
+    process.env.CODEX_AUTH_MODE = 'openai';
+    mockEnv.OPENAI_API_KEY = 'sk-test';
+    mockFiles.set('/root/.agents/skills', '');
+
+    const osSpy = vi.spyOn(os, 'homedir');
+    osSpy.mockReturnValue('/root');
+    vi.mocked(fs.statSync).mockImplementation(
+      (file: fs.PathLike) =>
+        ({
+          isDirectory: () => file === '/root/.agents/skills',
+        }) as fs.Stats,
+    );
+
+    try {
+      const resultPromise = runContainerAgent(
+        testGroup,
+        testInput,
+        () => {},
+        vi.fn(async () => {}),
+      );
+
+      expect(vi.mocked(fs.cpSync)).toHaveBeenCalledWith(
+        '/root/.agents/skills',
+        '/tmp/nanoclaw-test-data/sessions/test-group/.codex/skills',
+        { recursive: true },
+      );
+
+      emitOutputMarker(fakeProc, {
+        status: 'success',
+        result: 'Done',
+        newSessionId: 'session-skills',
       });
       await vi.advanceTimersByTimeAsync(10);
       fakeProc.emit('close', 0);

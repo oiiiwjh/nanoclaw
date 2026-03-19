@@ -92,6 +92,28 @@ Then run `/setup`. Claude Code handles everything: dependencies, authentication,
 - **Agent Swarms** - Spin up teams of specialized agents that collaborate on complex tasks
 - **Optional integrations** - Add Gmail (`/add-gmail`) and more via skills
 
+## Container Mount Layout
+
+For the main group, NanoClaw mounts the following host paths into the agent container:
+
+| Container path | Host path | Access | Purpose |
+|---|---|---|---|
+| `/workspace/project` | Project root (`nanoclaw/`) | Read-only | Lets the main group inspect the application code without modifying the host repo |
+| `/workspace/project/.env` | `/dev/null` shadow mount when `.env` exists | Read-only | Prevents the container from reading host secrets from `.env` |
+| `/workspace/group` | `groups/main` | Read-write | Main working directory for generated files, group memory, and conversation artifacts |
+| `/workspace/ipc` | `data/...` per-group IPC directory | Read-write | Message exchange between NanoClaw and the long-lived agent session |
+| `/home/node/.claude` | `data/sessions/main/.claude` | Read-write | Per-group Claude session state, settings, and synced built-in skills |
+| `/home/node/.codex` | `data/sessions/main/.codex` | Read-write | Per-group Codex config and auth mirror when using the Codex provider |
+| `/app/src` | `data/sessions/main/agent-runner-src` | Read-write | Per-group writable copy of the agent-runner source used inside the container |
+
+Notes:
+
+- `main` is special: it gets the whole project mounted read-only at `/workspace/project` and its own group folder mounted read-write at `/workspace/group`.
+- Non-main groups only get their own group folder at `/workspace/group`; they do not get the full project root.
+- Non-main groups may also get `/workspace/global` mapped to `groups/global` as a read-only shared memory directory when that folder exists.
+- For Codex groups, NanoClaw incrementally syncs `~/.codex/rules` into `data/sessions/<group>/.codex/rules` and `~/.agents/skills` into `data/sessions/<group>/.codex/skills`. These are additive copies and do not delete existing files in the group session directory.
+- Additional mounts can be added under `/workspace/extra/*`, but only if they pass the external mount allowlist.
+
 ## Usage
 
 Talk to your assistant with the trigger word (default: `@Andy`):
