@@ -8,8 +8,10 @@ import os from 'os';
 // Sentinel markers must match container-runner.ts
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
-const mockEnv: Record<string, string> = {};
-const mockFiles = new Map<string, string>();
+const { mockEnv, mockFiles } = vi.hoisted(() => ({
+  mockEnv: {} as Record<string, string>,
+  mockFiles: new Map<string, string>(),
+}));
 
 // Mock config
 vi.mock('./config.js', () => ({
